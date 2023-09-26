@@ -37,9 +37,8 @@ class FourierFeatures(BaseTransformer):
 
     Parameters
     ----------
-    sp_list : List[float or str]
-        list of seasonal periods. Float refers to the number of indices, whereas str
-        refers to a frequency defined as a pandas offset alias [4]_
+    sp_list : List[float]
+        list of seasonal periods
     fourier_terms_list : List[int]
         list of number of fourier terms (K) for each seasonal period.
         Each K matches to the sp (seasonal period) of the sp_list.
@@ -49,7 +48,8 @@ class FourierFeatures(BaseTransformer):
     freq : str, optional, default = None
         Only used when X has a pd.DatetimeIndex without a specified frequency.
         Specifies the frequency of the index of your data. The string should
-        match a pandas offset alias [4]_
+        match a pandas offset alias:
+        https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases
     keep_original_columns : boolean, optional, default=False
         Keep original columns in X passed to `.transform()`
 
@@ -61,7 +61,6 @@ class FourierFeatures(BaseTransformer):
         practice, 3rd edition, OTexts: Melbourne, Australia. OTexts.com/fpp3.
         Accessed on August 14th 2022.
     .. [3] https://pkg.robjhyndman.com/forecast/reference/fourier.html
-    .. [4] https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases
 
     Examples
     --------
@@ -126,6 +125,12 @@ class FourierFeatures(BaseTransformer):
                 "to the length of fourier_terms_list."
             )
 
+        if np.any(np.array(self.sp_list) / np.array(self.fourier_terms_list) < 1):
+            raise ValueError(
+                "In FourierFeatures the number of each element of fourier_terms_list"
+                "needs to be lower from the corresponding element of the sp_list"
+            )
+
         super().__init__()
 
     def _fit(self, X, y=None):
@@ -150,6 +155,23 @@ class FourierFeatures(BaseTransformer):
         -------
         self: reference to self
         """
+        # Create the sp, k pairs
+        # Don't add pairs where the coefficient k/sp already exists
+        self.sp_k_pairs_list_ = []
+        coefficient_list = []
+        for i, sp in enumerate(self.sp_list):
+            for k in range(1, self.fourier_terms_list[i] + 1):
+                coef = k / sp
+                if coef not in coefficient_list:
+                    coefficient_list.append(coef)
+                    self.sp_k_pairs_list_.append((sp, k))
+                else:
+                    warnings.warn(
+                        f"The terms sin_{sp}_{k} and cos_{sp}_{k} from FourierFeatures "
+                        "will be skipped because the resulting coefficient already "
+                        "exists from other seasonal period, fourier term pairs.",
+                        stacklevel=2,
+                    )
 
         time_index = X.index
 
@@ -164,32 +186,10 @@ class FourierFeatures(BaseTransformer):
                      does not match the frequency given:{self.freq}."
                 )
             time_index = time_index.to_period(self.freq_)
-
         # this is used to make sure that time t is calculated with reference to
         # the data passed on fit
         # store the integer form of the minimum date in the prediod index
         self.min_t_ = np.min(time_index.astype("int64"))
-
-        # check sp_list and coerce to float
-        sp_list = self._check_sp_list(self.sp_list)
-
-        # Create the sp, k pairs
-        # Don't add pairs where the coefficient k/sp already exists
-        self.sp_k_pairs_list_ = []
-        coefficient_list = []
-        for i, sp in enumerate(sp_list):
-            for k in range(1, self.fourier_terms_list[i] + 1):
-                coef = k / sp
-                if coef not in coefficient_list:
-                    coefficient_list.append(coef)
-                    self.sp_k_pairs_list_.append((sp, k))
-                else:
-                    warnings.warn(
-                        f"The terms sin_{sp}_{k} and cos_{sp}_{k} from FourierFeatures "
-                        "will be skipped because the resulting coefficient already "
-                        "exists from other seasonal period, fourier term pairs.",
-                        stacklevel=2,
-                    )
 
         return self
 
@@ -231,35 +231,6 @@ class FourierFeatures(BaseTransformer):
 
         return X_transformed
 
-    def _check_sp_list(self, sp_list):
-        """Check and coerce sp_list for fit function
-
-        Parameters
-        ----------
-        sp_list : List[float or str]
-            list of seasonal periods. Float refers to the number of indices, whereas str
-            refers to a frequency defined as a pandas offset alias
-
-        Returns
-        -------
-        sp_list : List[float]
-            list of seasonal periods
-        """
-
-        # coerce sp_list str to float
-        sp_list = [
-            pd.Timedelta(sp) / pd.Timedelta(self.freq_) if isinstance(sp, str) else sp
-            for sp in sp_list
-        ]
-
-        if np.any(np.array(sp_list) / np.array(self.fourier_terms_list) < 1):
-            raise ValueError(
-                "In FourierFeatures the number of each element of fourier_terms_list"
-                "needs to be lower from the corresponding element of the sp_list"
-            )
-
-        return sp_list
-
     @classmethod
     def get_test_params(cls, parameter_set="default"):
         """Return testing parameter settings for the estimator.
@@ -282,8 +253,6 @@ class FourierFeatures(BaseTransformer):
         params = [
             {"sp_list": [12], "fourier_terms_list": [4]},
             {"sp_list": [12, 6.2], "fourier_terms_list": [3, 4]},
-            {"sp_list": ["365D"], "fourier_terms_list": [4]},
-            {"sp_list": ["365D", "188.6D"], "fourier_terms_list": [3, 4]},
         ]
         return params
 
