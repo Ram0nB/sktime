@@ -125,11 +125,19 @@ class FourierFeatures(BaseTransformer):
                 "to the length of fourier_terms_list."
             )
 
-        if np.any(np.array(self.sp_list) / np.array(self.fourier_terms_list) < 1):
-            raise ValueError(
-                "In FourierFeatures the number of each element of fourier_terms_list"
-                "needs to be lower from the corresponding element of the sp_list"
-            )
+        for i in range(len(self.sp_list)):
+            if isinstance(sp_list[i], str):
+                if any(char.isdigit() for char in sp_list[i]):
+                    raise ValueError(
+                        "In FourierFeatures' sp_list, the offset "
+                        "string can't contain digits"
+                    )
+            elif sp_list[i] / fourier_terms_list[i] < 1:
+                raise ValueError(
+                    "In FourierFeatures the number of each element of "
+                    "fourier_terms_list needs to be lower from the corresponding "
+                    "element of the sp_list"
+                )
 
         super().__init__()
 
@@ -161,17 +169,21 @@ class FourierFeatures(BaseTransformer):
         coefficient_list = []
         for i, sp in enumerate(self.sp_list):
             for k in range(1, self.fourier_terms_list[i] + 1):
-                coef = k / sp
-                if coef not in coefficient_list:
-                    coefficient_list.append(coef)
+                if not isinstance(sp, str):  # periodicity sp relative to start
+                    coef = k / sp
+                    if coef not in coefficient_list:
+                        coefficient_list.append(coef)
+                        self.sp_k_pairs_list_.append((sp, k))
+                    else:
+                        warnings.warn(
+                            f"The terms sin_{sp}_{k} and cos_{sp}_{k} from "
+                            "FourierFeatures will be skipped because the resulting "
+                            "coefficient already exists from other seasonal period, "
+                            "fourier term pairs.",
+                            stacklevel=2,
+                        )
+                else:  # periodicity sp from offset string
                     self.sp_k_pairs_list_.append((sp, k))
-                else:
-                    warnings.warn(
-                        f"The terms sin_{sp}_{k} and cos_{sp}_{k} from FourierFeatures "
-                        "will be skipped because the resulting coefficient already "
-                        "exists from other seasonal period, fourier term pairs.",
-                        stacklevel=2,
-                    )
 
         time_index = X.index
 
@@ -185,6 +197,8 @@ class FourierFeatures(BaseTransformer):
                     f"Using frequency from index: {time_index.freq}, which \
                      does not match the frequency given:{self.freq}."
                 )
+            if time_index.tz is not None:
+                time_index = time_index.tz_convert("UTC").tz_localize(None)
             time_index = time_index.to_period(self.freq_)
         # this is used to make sure that time t is calculated with reference to
         # the data passed on fit
@@ -214,6 +228,8 @@ class FourierFeatures(BaseTransformer):
         time_index = X.index
 
         if isinstance(time_index, pd.DatetimeIndex):
+            if time_index.tz is not None:
+                time_index = time_index.tz_convert("UTC").tz_localize(None)
             time_index = time_index.to_period(self.freq_)
 
         # get the integer form of the PeriodIndex
@@ -223,13 +239,75 @@ class FourierFeatures(BaseTransformer):
             sp = sp_k[0]
             k = sp_k[1]
 
-            X_transformed[f"sin_{sp}_{k}"] = np.sin(int_index * 2 * k * np.pi / sp)
-            X_transformed[f"cos_{sp}_{k}"] = np.cos(int_index * 2 * k * np.pi / sp)
+            if not isinstance(sp, str):  # periodicity sp relative to start
+                X_transformed[f"sin_{sp}_{k}"] = np.sin(int_index * 2 * k * np.pi / sp)
+                X_transformed[f"cos_{sp}_{k}"] = np.cos(int_index * 2 * k * np.pi / sp)
+            else:  # periodicity sp from offset string
+                if isinstance(X.index, pd.PeriodIndex):
+                    datetime_index = X.index.to_timestamp()
+                else:
+                    datetime_index = X.index
+                frac_index = self._offset_frac_since_prev_offset(
+                    datetime_index=datetime_index,
+                    offset_str=sp,
+                )
+                X_transformed[f"sin_{sp}_{k}"] = np.sin(frac_index * 2 * k * np.pi)
+                X_transformed[f"cos_{sp}_{k}"] = np.cos(frac_index * 2 * k * np.pi)
 
         if self.keep_original_columns:
             X_transformed = pd.concat([X, X_transformed], axis=1, copy=True)
 
         return X_transformed
+
+    def _offset_frac_since_prev_offset(self, datetime_index, offset_str):
+        """Get time passed as fraction of the current period
+
+        Parameters
+        ----------
+        datetime_index : pandas DatetimeIndex
+        offset_str : pandas offset str
+            Cannot contain digits
+
+        Returns
+        -------
+        numpy array containing the time passed between [previous offset, next offset)
+        as fraction for every datetime in datetimes
+        """
+
+        def _get_frac(datetime, offset_boundaries):
+            i = np.searchsorted(offset_boundaries, datetime, side="right")
+            prev = offset_boundaries[i - 1]
+            next = offset_boundaries[i]
+            period_timedelta = next - prev
+            since_prev_timedelta = datetime - prev
+            return since_prev_timedelta / period_timedelta
+
+        offset = pd.tseries.frequencies.to_offset(offset_str)
+        offset_boundaries = pd.date_range(
+            start=np.amin(datetime_index) - offset,
+            end=np.amax(datetime_index) + offset,
+            freq=offset_str,
+            tz=datetime_index.tz,
+        )
+
+        # date_range created with offsets <= 1day have boundaries on the first
+        # moment of the new period, but date_range created with offsets > 1day
+        # have boundaries on the last day of the period rather than the desired
+        # first day of new period. workaround: shift by 1 day
+        shift = True
+        try:
+            if pd.Timedelta(f"1{offset_str}") <= pd.Timedelta(days=1):
+                shift = False
+        except Exception:
+            # not all possible offset_str > 1 day are ambiguous
+            # if not ambiguous, can't be converted to timedelta
+            ...
+        if shift:
+            offset_boundaries = offset_boundaries + pd.Timedelta(days=1)
+
+        fracs = [_get_frac(dt, offset_boundaries) for dt in datetime_index]
+
+        return np.array(fracs)
 
     @classmethod
     def get_test_params(cls, parameter_set="default"):
@@ -253,6 +331,8 @@ class FourierFeatures(BaseTransformer):
         params = [
             {"sp_list": [12], "fourier_terms_list": [4]},
             {"sp_list": [12, 6.2], "fourier_terms_list": [3, 4]},
+            {"sp_list": ["Y"], "fourier_terms_list": [4]},
+            {"sp_list": ["Y", "Q"], "fourier_terms_list": [3, 4]},
         ]
         return params
 
